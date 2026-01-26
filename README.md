@@ -2,25 +2,26 @@
 
 Streaming inference implementation for [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) that the official repo doesn't provide.
 
-The official team mentions "Extreme Low-Latency Streaming Generation" in their paper and marketing, but the actual streaming code was never released — they point users to vLLM-Omni, which still doesn't support online serving.
+The official team mentions "Extreme Low-Latency Streaming Generation" in their paper and marketing, but the actual streaming code was never released - they point users to vLLM-Omni, which still doesn't support online serving.
 
 This fork adds real streaming generation directly to the `qwen-tts` package.
 
 ## What's Added
 
-- `stream_generate_pcm()` — real-time PCM audio streaming
-- `stream_generate_voice_clone()` — streaming with voice cloning
+- `stream_generate_pcm()` - real-time PCM audio streaming
+- `stream_generate_voice_clone()` - streaming with voice cloning
 
 ## Benchmark (RTX 5090)
 
-| Metric | Value |
-|--------|-------|
-| Standard generation | 12.58s |
-| **First chunk latency** | **0.86s** |
-| Streaming total | 12.11s |
-| Latency improvement | 11.72s faster to first audio |
+### Non-streaming (full inference)
 
-15 chunks, ~0.8s between emissions.
+<img width="575" height="136" alt="image" src="https://github.com/user-attachments/assets/e0744b19-d31b-44df-9f61-5be56f29056b" />
+
+
+### Streaming
+
+<img width="738" height="130" alt="image" src="https://github.com/user-attachments/assets/5694aa47-f2db-4b97-ae41-4d834838f8d8" />
+
 
 ## Usage
 
