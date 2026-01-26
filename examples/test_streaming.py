@@ -25,9 +25,13 @@ start = log_time(start, "Load Base model")
 # for real speedup, use vLLM for LM inference (or SGlang probably)
 # torch.compile doesn't help much for autoregressive generation due to dynamic shapes
 
-ref_audio_path = "ref-audio.wav"
+ref_audio_path = "kuklina-1.wav"
 ref_text = (
-    "ref text"
+    "Это брат Кэти, моей одноклассницы. А что у тебя с рукой? И почему ты голая? У него ведь куча наград по "
+    "боевым искусствам. Кэти рассказывала, правда, Лео? Понимаешь кого ты побила, Лая? "
+    "Только потрогай эти мышцы... Не знала, что у тебя такой классный котик. Рожденная луной. "
+    "Лай всегда откопает что-нибудь этакое. Да, жаль только, что занимает почти всё её время. "
+    "Не понимаю, почему эта рухлядь не может подождать, пока ты проведешь время с сестрой."
 )
 
 voice_clone_prompt = clone_model.create_voice_clone_prompt(
@@ -37,7 +41,7 @@ voice_clone_prompt = clone_model.create_voice_clone_prompt(
 start = log_time(start, "Create voice clone prompt")
 
 # Test sentence
-test_text = "Hello! This is the test text"
+test_text = "Всем привет! Это тестовый текст для озвучки! Стриминг звучит нормально только через несколько секунд."
 
 # ============== Standard generation ==============
 print("\n--- Standard generation ---")
