@@ -809,7 +809,7 @@ class Qwen3TTSModel:
         text: Union[str, List[str]],
         instruct: Union[str, List[str]],
         language: Union[str, List[str]] = None,
-        non_streaming_mode: bool = False,
+        non_streaming_mode: bool = True,
         **kwargs,
     ) -> Tuple[List[np.ndarray], int]:
         """
@@ -905,7 +905,7 @@ class Qwen3TTSModel:
         speaker: Union[str, List[str]],
         language: Union[str, List[str]] = None,
         instruct: Optional[Union[str, List[str]]] = None,
-        non_streaming_mode: bool = False,
+        non_streaming_mode: bool = True,
         **kwargs,
     ) -> Tuple[List[np.ndarray], int]:
         """

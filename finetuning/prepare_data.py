@@ -48,14 +48,18 @@ def main():
         if len(batch_lines) >= BATCH_INFER_NUM:
             enc_res = tokenizer_12hz.encode(batch_audios)
             for code, line in zip(enc_res.audio_codes, batch_lines):
-                line['audio_codes'] = code
+                line['audio_codes'] = code.cpu().tolist()
                 final_lines.append(line)
+            batch_lines.clear()
+            batch_audios.clear()
 
     if len(batch_audios) > 0:
         enc_res = tokenizer_12hz.encode(batch_audios)
         for code, line in zip(enc_res.audio_codes, batch_lines):
             line['audio_codes'] = code.cpu().tolist()
             final_lines.append(line)
+        batch_lines.clear()
+        batch_audios.clear()
 
     final_lines = [json.dumps(line, ensure_ascii=False) for line in final_lines]
 
