@@ -1,10 +1,11 @@
 """
 Test TTS with optimizations (non-streaming mode).
 
-Uses the same optimizations as streaming for ~4x speedup:
-1. generate_fast() - bypasses HuggingFace generate() overhead (2-3x speedup)
-2. torch.compile for decoder with max-autotune mode
+Optimizations applied:
+1. torch.compile for decoder (max-autotune mode)
+2. torch.compile for talker model
 3. Compiled codebook predictor
+4. Fast codebook generation (bypasses HF generate() overhead)
 
 Usage:
     cd Qwen3-TTS
@@ -121,18 +122,26 @@ def main():
         use_compile=True,
         use_cuda_graphs=False,  # Not needed for non-streaming (variable sizes)
         compile_mode="max-autotune",  # Better for batch processing than reduce-overhead
-        use_fast_codebook=True,  # KEY: 2-3x speedup by bypassing HF generate()
-        compile_codebook_predictor=True,  # Compile the codebook predictor too
+        use_fast_codebook=True,
+        compile_codebook_predictor=True,
+        compile_talker=True,
     )
 
-    # Warmup run (first run after compile is slower due to compilation)
-    print("\nWarmup run (first run after compile)...")
-    warmup_result = run_generation(
-        model, "Тест один два три четыре пять.", "Russian", voice_clone_prompt,
-        label="warmup",
-    )
-    warmup_rtf = warmup_result['total_time'] / warmup_result['audio_duration'] if warmup_result['audio_duration'] > 0 else 0
-    print(f"Warmup: Total: {warmup_result['total_time']:.2f}s, Audio: {warmup_result['audio_duration']:.2f}s, RTF: {warmup_rtf:.2f}")
+    # Warmup runs (compilation happens here, especially slow for max-autotune)
+    warmup_texts = [
+        "Тест один два три четыре пять.",
+        "Привет, как дела? Это второй прогрев системы.",
+        "Третий тестовый запуск для полного прогрева всех компонентов модели.",
+    ]
+
+    print("\nWarmup runs (compilation happens here)...")
+    for i, warmup_text in enumerate(warmup_texts, 1):
+        warmup_result = run_generation(
+            model, warmup_text, "Russian", voice_clone_prompt,
+            label=f"warmup_{i}",
+        )
+        warmup_rtf = warmup_result['total_time'] / warmup_result['audio_duration'] if warmup_result['audio_duration'] > 0 else 0
+        print(f"  Warmup {i}: {warmup_result['total_time']:.2f}s, Audio: {warmup_result['audio_duration']:.2f}s, RTF: {warmup_rtf:.2f}")
 
     # Actual test run
     print("\nOptimized test run...")
@@ -170,17 +179,18 @@ def main():
     print("SUMMARY")
     print("=" * 80)
 
-    baseline_total = results[0]["total_time"]
+    baseline_audio_dur = results[0].get("audio_duration", 0)
+    baseline_rtf = results[0]["total_time"] / baseline_audio_dur if baseline_audio_dur > 0 else 0
 
-    print(f"\n{'Method':<20} {'Total':>10} {'Audio':>10} {'RTF':>8} {'Speedup':>10}")
-    print("-" * 60)
+    print(f"\n{'Method':<20} {'Total':>10} {'Audio':>10} {'RTF':>8} {'RTF Speedup':>12}")
+    print("-" * 65)
 
     for r in results:
         total = r["total_time"]
         audio_dur = r.get("audio_duration", 0)
         rtf = total / audio_dur if audio_dur > 0 else 0
-        speedup = baseline_total / total if total > 0 else 0
-        print(f"{r['label']:<20} {total:>9.2f}s {audio_dur:>9.2f}s {rtf:>8.2f} {speedup:>9.2f}x")
+        speedup = baseline_rtf / rtf if rtf > 0 else 0
+        print(f"{r['label']:<20} {total:>9.2f}s {audio_dur:>9.2f}s {rtf:>8.2f} {speedup:>11.2f}x")
 
     print(f"\n[{time.time() - total_start:.2f}s] TOTAL SCRIPT TIME")
 
@@ -192,11 +202,10 @@ def main():
 1. torch.set_float32_matmul_precision('high') - TensorFloat32 on Ampere+ GPUs
 2. bfloat16 dtype - faster computation with minimal quality loss
 3. flash_attention_2 - efficient attention computation
-4. use_fast_codebook=True - bypasses HuggingFace generate() for 2-3x speedup
-5. torch.compile with max-autotune mode for decoder
-6. compile_codebook_predictor=True - compiled code predictor
-
-Expected speedup: 2.5-4x over baseline
+4. torch.compile(max-autotune) for decoder
+5. compile_talker=True - compiled talker model
+6. compile_codebook_predictor=True - compiled codebook predictor
+7. use_fast_codebook=True - bypasses HuggingFace generate() overhead
 """)
 
 
