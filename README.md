@@ -6,6 +6,8 @@ The official team mentions "Extreme Low-Latency Streaming Generation" in their p
 
 This fork adds real streaming generation directly to the `qwen-tts` package.
 
+In addition to real streaming, this fork includes an **~6x inference speedup** vs upstream qwen-tts - both for non-streaming generation and streaming mode.
+
 ## What's Added
 
 - `stream_generate_pcm()` - real-time PCM audio streaming
@@ -15,12 +17,14 @@ This fork adds real streaming generation directly to the `qwen-tts` package.
 
 ### Non-streaming (full inference)
 
-<img width="575" height="136" alt="image" src="https://github.com/user-attachments/assets/e0744b19-d31b-44df-9f61-5be56f29056b" />
+<img width="602" height="145" alt="image" src="https://github.com/user-attachments/assets/0cbfcc71-e854-46e2-81bc-ec3955ff3ff0" />
+
 
 
 ### Streaming
 
-<img width="738" height="130" alt="image" src="https://github.com/user-attachments/assets/5694aa47-f2db-4b97-ae41-4d834838f8d8" />
+<img width="766" height="183" alt="image" src="https://github.com/user-attachments/assets/f5df9a38-e091-47ae-a08f-ef364f8710ea" />
+
 
 
 ## Usage
