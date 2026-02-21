@@ -16,46 +16,37 @@ from pydub import AudioSegment
 import librosa
 import sentencex
 
+# Optimización global para matmul (TensorFloat32 en Ampere+)
+torch.set_float32_matmul_precision('high')
+
 # ----------------------------------------------------------------------
 # Configuración
 # ----------------------------------------------------------------------
 MODEL_NAME = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
-WHISPER_SIZE = "small"           # Ahorra VRAM
-DEVICE = "cuda:0"                # o "cpu" si no hay GPU
-DTYPE = torch.bfloat16           # usar bfloat16 para mejor rendimiento
-ATTN_IMPL = "flash_attention_2"  # requiere flash-attn instalado
-DEFAULT_CHUNK_SIZE = 280         # Igual que en Gradio
-MAX_NEW_TOKENS = 2048            # tokens máximos por llamada
+WHISPER_SIZE = "small"
+DEVICE = "cuda:0"
+DTYPE = torch.bfloat16
+ATTN_IMPL = "flash_attention_2"
+MAX_NEW_TOKENS = 2048
+CHUNK_SIZE_LIMIT = 900          # Caracteres máximos por fragmento (ajustable)
 
-# Carpeta base para voces y para audios generados
 BASE_DIR = Path(__file__).parent
 VOICES_DIR = BASE_DIR / "voces"
 AUDIOS_DIR = BASE_DIR / "audios"
 VOICES_DIR.mkdir(exist_ok=True)
 AUDIOS_DIR.mkdir(exist_ok=True)
 
-# Mapeo de nombres de idioma (para la generación) a códigos ISO (para sentencex)
 LANG_CODE_MAP = {
-    "Spanish": "es",
-    "English": "en",
-    "Chinese": "zh",
-    "Japanese": "ja",
-    "Korean": "ko",
-    "German": "de",
-    "French": "fr",
-    "Russian": "ru",
-    "Portuguese": "pt",
-    "Italian": "it",
+    "Spanish": "es", "English": "en", "Chinese": "zh", "Japanese": "ja",
+    "Korean": "ko", "German": "de", "French": "fr", "Russian": "ru",
+    "Portuguese": "pt", "Italian": "it",
 }
 
 # ----------------------------------------------------------------------
 # Utilidades
 # ----------------------------------------------------------------------
 def normalize_ref_audio(audio_path):
-    """
-    Convierte cualquier audio de referencia a 24 kHz mono y normaliza.
-    Exactamente como en el script de diagnóstico que funcionó.
-    """
+    """Convierte audio a 24 kHz mono y normaliza."""
     try:
         audio_segment = AudioSegment.from_file(audio_path)
         audio_segment = audio_segment.set_frame_rate(24000).set_channels(1)
@@ -74,19 +65,12 @@ def normalize_ref_audio(audio_path):
         print(f"Error procesando audio: {e}")
         return None
 
-
-def split_text_into_chunks(text, language_code, max_chars=DEFAULT_CHUNK_SIZE):
-    """
-    Divide el texto en fragmentos de como máximo max_chars,
-    utilizando sentencex para respetar los límites de las oraciones reales.
-    """
+def split_text_into_chunks(text, language_code, max_chars=CHUNK_SIZE_LIMIT):
+    """Divide texto en fragmentos respetando límite de caracteres y oraciones."""
     if len(text) <= max_chars:
         return [text]
-
     sentences = list(sentencex.segment(language_code, text))
-
-    chunks = []
-    current_chunk = ""
+    chunks, current_chunk = [], ""
     for sentence in sentences:
         if len(sentence) > max_chars:
             if current_chunk:
@@ -99,20 +83,15 @@ def split_text_into_chunks(text, language_code, max_chars=DEFAULT_CHUNK_SIZE):
             if current_chunk:
                 chunks.append(current_chunk.strip())
             current_chunk = sentence
-
     if current_chunk:
         chunks.append(current_chunk.strip())
-
     return chunks
 
-
 def generate_audio_filename(prefix="generado"):
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    return f"{prefix}_{timestamp}.wav"
-
+    return f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}.wav"
 
 # ----------------------------------------------------------------------
-# Hilo de carga de modelos
+# Hilo de carga de modelos (con optimizaciones completas y warmup)
 # ----------------------------------------------------------------------
 class ModelLoaderThread(threading.Thread):
     def __init__(self, parent, status_callback):
@@ -130,20 +109,81 @@ class ModelLoaderThread(threading.Thread):
                 attn_implementation=ATTN_IMPL,
             )
         except Exception as e:
-            wx.CallAfter(self.status_callback, f"Error cargando TTS: {e}")
+            wx.CallAfter(self.status_callback, f"Error TTS: {e}")
             wx.CallAfter(self.parent.on_model_load_failed, str(e))
             return
 
-        wx.CallAfter(self.status_callback, "Cargando Whisper (small)...")
+        # Aplicar optimizaciones completas (como en test_optimized_no_streaming.py)
+        wx.CallAfter(self.status_callback, "Aplicando optimizaciones completas (esto puede tomar varios minutos)...")
+
         try:
-            whisper = WhisperModel(WHISPER_SIZE, device="cuda" if "cuda" in DEVICE else "cpu", compute_type="float16")
+            print("\n" + "=" * 60)
+            print("Aplicando optimizaciones: max-autotune + compile_talker + fast codebook")
+            print("=" * 60)
+
+            tts.enable_streaming_optimizations(
+                decode_window_frames=300,
+                use_compile=True,
+                use_cuda_graphs=False,
+                compile_mode="max-autotune",
+                use_fast_codebook=True,
+                compile_codebook_predictor=True,
+                compile_talker=True,
+            )
+
+            # Calentamiento con textos de distintas longitudes para compilar todos los shapes
+            wx.CallAfter(self.status_callback, "Calentando el modelo (primera compilación, puede tardar 1-2 minutos)...")
+
+            warmup_texts = [
+                "Hola",
+                "Este es un texto de prueba.",
+                "La inteligencia artificial está transformando el mundo.",
+                "Este cuarto texto tiene aproximadamente cien caracteres, suficiente para cubrir un tamaño mediano.",
+                "Este quinto texto tiene alrededor de doscientos caracteres y se usa para compilar tamaños grandes."
+            ]
+
+            dummy_sr = 24000
+            dummy_audio = np.zeros(dummy_sr, dtype=np.float32)  # 1 segundo de silencio
+
+            print("\nRealizando calentamiento con múltiples textos...")
+            for idx, wtext in enumerate(warmup_texts, 1):
+                warmup_start = time.time()
+                try:
+                    wavs, sr = tts.generate_voice_clone(
+                        text=wtext,
+                        language="Spanish",
+                        ref_audio=(dummy_audio, dummy_sr),
+                        ref_text=wtext[:50],
+                        x_vector_only_mode=False,
+                        max_new_tokens=200
+                    )
+                    elapsed = time.time() - warmup_start
+                    print(f"  Warmup {idx}: {elapsed:.2f}s para {len(wtext)} caracteres")
+                    del wavs
+                except Exception as e:
+                    print(f"  Warmup {idx} falló (no crítico): {e}")
+                torch.cuda.empty_cache()
+                gc.collect()
+
+            print("Calentamiento finalizado. Modelo listo para generación rápida.")
+
         except Exception as e:
-            wx.CallAfter(self.status_callback, f"Error cargando Whisper: {e}")
+            print(f"Advertencia: No se pudieron aplicar todas las optimizaciones ({e})")
+            print("El modelo funcionará sin ellas, pero será más lento.")
+
+        wx.CallAfter(self.status_callback, "Cargando Whisper...")
+        try:
+            whisper = WhisperModel(
+                WHISPER_SIZE,
+                device="cuda" if "cuda" in DEVICE else "cpu",
+                compute_type="float16"
+            )
+        except Exception as e:
+            wx.CallAfter(self.status_callback, f"Error Whisper: {e}")
             wx.CallAfter(self.parent.on_model_load_failed, str(e))
             return
 
         wx.CallAfter(self.parent.on_models_loaded, tts, whisper)
-
 
 # ----------------------------------------------------------------------
 # Hilo de transcripción
@@ -170,13 +210,12 @@ class TranscriptionThread(threading.Thread):
         finally:
             wx.CallAfter(self.parent.unload_whisper)
 
-
 # ----------------------------------------------------------------------
-# Hilo de generación (versión optimizada, con sentencex)
+# Hilo de generación
 # ----------------------------------------------------------------------
 class GenerationThread(threading.Thread):
     def __init__(self, parent, tts_model, ref_audio_path, ref_text,
-                 target_text, language, seed, temperature, top_p, chunk_size,
+                 target_text, language, seed, temperature, top_p,
                  x_vector_only, status_callback, done_callback):
         super().__init__()
         self.parent = parent
@@ -184,41 +223,35 @@ class GenerationThread(threading.Thread):
         self.ref_audio_path = ref_audio_path
         self.ref_text = ref_text
         self.target_text = target_text
-        self.language = language          # Nombre del idioma (ej. "Spanish", "Auto")
+        self.language = language
         self.seed = seed
         self.temperature = temperature
         self.top_p = top_p
-        self.chunk_size = chunk_size
         self.x_vector_only = x_vector_only
         self.status_callback = status_callback
         self.done_callback = done_callback
 
     def run(self):
         try:
-            # 1. Normalizar audio de referencia
             wx.CallAfter(self.status_callback, "Normalizando audio...")
             audio_tuple = normalize_ref_audio(self.ref_audio_path)
             if audio_tuple is None:
                 raise Exception("Error al procesar el audio de referencia.")
 
-            # 2. Determinar idioma para sentencex
-            if self.language == "Auto":
-                lang_code = "es"  # fallback a español
+            lang_code = LANG_CODE_MAP.get(self.language, "es") if self.language != "Auto" else "es"
+
+            wx.CallAfter(self.status_callback, "Preparando texto...")
+            if len(self.target_text) > CHUNK_SIZE_LIMIT:
+                chunks = split_text_into_chunks(self.target_text, lang_code)
+                wx.CallAfter(self.status_callback, f"Texto dividido en {len(chunks)} fragmentos.")
             else:
-                lang_code = LANG_CODE_MAP.get(self.language, "es")
+                chunks = [self.target_text]
 
-            # 3. Dividir texto con sentencex
-            wx.CallAfter(self.status_callback, "Fragmentando texto con sentencex...")
-            chunks = split_text_into_chunks(self.target_text, lang_code, max_chars=self.chunk_size)
-            wx.CallAfter(self.status_callback, f"Texto dividido en {len(chunks)} fragmentos.")
-
-            # 4. Fijar semilla
             if self.seed != -1:
                 torch.manual_seed(self.seed)
                 random.seed(self.seed)
                 np.random.seed(self.seed)
 
-            # 5. Preparar kwargs (solo los que el usuario modificó)
             gen_kwargs = {"max_new_tokens": MAX_NEW_TOKENS}
             if abs(self.temperature - 0.9) > 1e-3:
                 gen_kwargs["temperature"] = self.temperature
@@ -227,31 +260,48 @@ class GenerationThread(threading.Thread):
 
             all_audio = []
             sample_rate = None
+            total_start = time.time()
 
             for i, chunk in enumerate(chunks):
                 wx.CallAfter(self.status_callback, f"Generando fragmento {i+1}/{len(chunks)}...")
-                start = time.time()
+                start_gen = time.time()
+
                 wavs, sr_out = self.tts.generate_voice_clone(
                     text=chunk,
-                    language=self.language,  # Para la generación usamos el nombre
+                    language=self.language,
                     ref_audio=audio_tuple,
                     ref_text=self.ref_text,
                     x_vector_only_mode=self.x_vector_only,
                     **gen_kwargs
                 )
-                elapsed = time.time() - start
+
+                elapsed = time.time() - start_gen
                 wx.CallAfter(self.status_callback, f"Fragmento {i+1} generado en {elapsed:.1f}s")
+
                 if sample_rate is None:
                     sample_rate = sr_out
                 all_audio.append(wavs[0])
-                # Liberar memoria
+
                 del wavs
                 torch.cuda.empty_cache()
                 gc.collect()
 
-            # Concatenar
             if all_audio:
                 final_audio = np.concatenate(all_audio)
+                total_time = time.time() - total_start
+                audio_duration = len(final_audio) / sample_rate if sample_rate else 0
+                rtf = total_time / audio_duration if audio_duration > 0 else 0
+
+                print("\n" + "=" * 50)
+                print("RESUMEN DE GENERACIÓN")
+                print("=" * 50)
+                print(f"Texto: {len(self.target_text)} caracteres en {len(chunks)} fragmentos")
+                print(f"Tiempo total: {total_time:.2f}s")
+                print(f"Duración audio: {audio_duration:.2f}s")
+                print(f"RTF: {rtf:.2f}")
+                print(f"Modo rápido (x-vector): {'ACTIVADO' if self.x_vector_only else 'DESACTIVADO'}")
+                print("=" * 50)
+
                 wx.CallAfter(self.done_callback, final_audio, sample_rate, len(chunks))
             else:
                 wx.CallAfter(self.done_callback, None, None, 0)
@@ -259,17 +309,15 @@ class GenerationThread(threading.Thread):
         except Exception as e:
             wx.CallAfter(self.done_callback, None, None, 0, error=str(e))
 
-
 # ----------------------------------------------------------------------
 # Marco principal (interfaz wxPython)
 # ----------------------------------------------------------------------
 class MainFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="Clonación de Voz Qwen3-TTS", size=(950, 700))
+        super().__init__(None, title="Clonación de Voz Qwen3-TTS (Ultra Rápido)", size=(950, 700))
         self.tts_model = None
         self.whisper_model = None
         self.current_audio_data = None
-        self.current_temp_file = None
         self.last_saved_path = None
 
         self._create_accelerators()
@@ -317,26 +365,20 @@ class MainFrame(wx.Frame):
         grid1.AddGrowableCol(1)
 
         lbl_folder = wx.StaticText(panel, label="&Carpeta (Alt+C):")
-        lbl_folder.SetName("lbl_folder")
         self.folder_choice = wx.Choice(panel, size=(300, -1))
-        self.folder_choice.SetName("folder_choice")
         grid1.Add(lbl_folder, 0, wx.ALIGN_CENTER_VERTICAL)
         grid1.Add(self.folder_choice, 1, wx.EXPAND)
 
         lbl_file = wx.StaticText(panel, label="&Archivo (Alt+A):")
-        lbl_file.SetName("lbl_file")
         self.file_choice = wx.Choice(panel, size=(300, -1))
-        self.file_choice.SetName("file_choice")
         grid1.Add(lbl_file, 0, wx.ALIGN_CENTER_VERTICAL)
         grid1.Add(self.file_choice, 1, wx.EXPAND)
 
         ref_sizer.Add(grid1, 0, wx.EXPAND | wx.ALL, 5)
 
         lbl_trans = wx.StaticText(panel, label="Texto transcrito (puedes editarlo):")
-        lbl_trans.SetName("lbl_trans")
         ref_sizer.Add(lbl_trans, 0, wx.TOP | wx.LEFT | wx.RIGHT, 5)
         self.transcript_text = wx.TextCtrl(panel, style=wx.TE_MULTILINE, size=(-1, 60))
-        self.transcript_text.SetName("transcript_text")
         ref_sizer.Add(self.transcript_text, 0, wx.EXPAND | wx.ALL, 5)
 
         main_sizer.Add(ref_sizer, 0, wx.EXPAND | wx.ALL, 5)
@@ -345,10 +387,8 @@ class MainFrame(wx.Frame):
         text_box = wx.StaticBox(panel, label="Texto a sintetizar")
         text_sizer = wx.StaticBoxSizer(text_box, wx.VERTICAL)
         lbl_target = wx.StaticText(panel, label="&Texto (Alt+T):")
-        lbl_target.SetName("lbl_target")
         text_sizer.Add(lbl_target, 0, wx.TOP | wx.LEFT | wx.RIGHT, 5)
         self.target_text = wx.TextCtrl(panel, style=wx.TE_MULTILINE, size=(-1, 100))
-        self.target_text.SetName("target_text")
         text_sizer.Add(self.target_text, 1, wx.EXPAND | wx.ALL, 5)
         main_sizer.Add(text_sizer, 1, wx.EXPAND | wx.ALL, 5)
 
@@ -359,48 +399,41 @@ class MainFrame(wx.Frame):
         grid2.AddGrowableCol(1)
         grid2.AddGrowableCol(3)
 
-        # Idioma (predeterminado: Spanish)
         lbl_lang = wx.StaticText(panel, label="&Idioma (Alt+I):")
-        lbl_lang.SetName("lbl_lang")
         self.lang_choice = wx.Choice(panel, choices=[
             "Auto", "Spanish", "English", "Chinese", "Japanese", "Korean",
             "German", "French", "Russian", "Portuguese", "Italian"
         ])
         self.lang_choice.SetSelection(1)  # Spanish
-        self.lang_choice.SetName("lang_choice")
         grid2.Add(lbl_lang, 0, wx.ALIGN_CENTER_VERTICAL)
         grid2.Add(self.lang_choice, 1, wx.EXPAND)
 
         lbl_seed = wx.StaticText(panel, label="Semilla (-1 aleatorio):")
-        lbl_seed.SetName("lbl_seed")
         self.seed_spin = wx.SpinCtrl(panel, min=-1, max=999999, initial=-1)
         grid2.Add(lbl_seed, 0, wx.ALIGN_CENTER_VERTICAL)
         grid2.Add(self.seed_spin, 1, wx.EXPAND)
 
         lbl_temp = wx.StaticText(panel, label="Temperatura (0.1-1.5):")
-        lbl_temp.SetName("lbl_temp")
         self.temp_spin = wx.SpinCtrlDouble(panel, min=0.1, max=1.5, inc=0.05, initial=0.9)
         self.temp_spin.SetDigits(2)
         grid2.Add(lbl_temp, 0, wx.ALIGN_CENTER_VERTICAL)
         grid2.Add(self.temp_spin, 1, wx.EXPAND)
 
         lbl_top_p = wx.StaticText(panel, label="Top P (0.1-1.0):")
-        lbl_top_p.SetName("lbl_top_p")
         self.top_p_spin = wx.SpinCtrlDouble(panel, min=0.1, max=1.0, inc=0.05, initial=1.0)
         self.top_p_spin.SetDigits(2)
         grid2.Add(lbl_top_p, 0, wx.ALIGN_CENTER_VERTICAL)
         grid2.Add(self.top_p_spin, 1, wx.EXPAND)
 
         self.xvector_check = wx.CheckBox(panel, label="Modo rápido (x-vector)")
-        self.xvector_check.SetName("xvector_check")
+        self.xvector_check.SetValue(False)  # Desactivado por defecto
         grid2.Add(self.xvector_check, 0, wx.ALIGN_CENTER_VERTICAL)
         grid2.AddStretchSpacer()
 
-        lbl_chunk = wx.StaticText(panel, label="Caracteres/fragmento:")
-        lbl_chunk.SetName("lbl_chunk")
-        self.chunk_spin = wx.SpinCtrl(panel, min=200, max=2000, initial=DEFAULT_CHUNK_SIZE)
-        grid2.Add(lbl_chunk, 0, wx.ALIGN_CENTER_VERTICAL)
-        grid2.Add(self.chunk_spin, 1, wx.EXPAND)
+        # Información sobre fragmentación automática
+        lbl_chunk_info = wx.StaticText(panel, label=f"Fragmentación automática >{CHUNK_SIZE_LIMIT} caracteres")
+        grid2.Add(lbl_chunk_info, 0, wx.ALIGN_CENTER_VERTICAL)
+        grid2.AddStretchSpacer()
 
         params_sizer.Add(grid2, 0, wx.EXPAND | wx.ALL, 5)
         main_sizer.Add(params_sizer, 0, wx.EXPAND | wx.ALL, 5)
@@ -408,19 +441,16 @@ class MainFrame(wx.Frame):
         # --- Botones ---
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.generate_btn = wx.Button(panel, label="&GENERAR (Alt+G)")
-        self.generate_btn.SetName("generate_btn")
         self.generate_btn.Disable()
         self.generate_btn.Bind(wx.EVT_BUTTON, self.on_generate)
         btn_sizer.Add(self.generate_btn, 0, wx.ALL, 5)
 
         self.save_btn = wx.Button(panel, label="Guardar como...")
-        self.save_btn.SetName("save_btn")
         self.save_btn.Disable()
         self.save_btn.Bind(wx.EVT_BUTTON, self.on_save)
         btn_sizer.Add(self.save_btn, 0, wx.ALL, 5)
 
         self.open_folder_btn = wx.Button(panel, label="Abrir carpeta de audios")
-        self.open_folder_btn.SetName("open_folder_btn")
         self.open_folder_btn.Bind(wx.EVT_BUTTON, self.on_open_audios_folder)
         btn_sizer.Add(self.open_folder_btn, 0, wx.ALL, 5)
 
@@ -428,12 +458,10 @@ class MainFrame(wx.Frame):
 
         # --- Estado ---
         self.status_label = wx.StaticText(panel, label="Inicializando...", style=wx.ALIGN_CENTER)
-        self.status_label.SetName("status_label")
         main_sizer.Add(self.status_label, 0, wx.EXPAND | wx.ALL, 5)
 
         panel.SetSizer(main_sizer)
 
-        # Eventos
         self.folder_choice.Bind(wx.EVT_CHOICE, self.on_folder_selected)
         self.file_choice.Bind(wx.EVT_CHOICE, self.on_file_selected)
 
@@ -510,7 +538,6 @@ class MainFrame(wx.Frame):
             self.whisper_model = None
             torch.cuda.empty_cache()
             gc.collect()
-            print("Whisper descargado de VRAM")
 
     def load_models(self):
         thread = ModelLoaderThread(self, self.update_status)
@@ -522,7 +549,7 @@ class MainFrame(wx.Frame):
     def on_models_loaded(self, tts, whisper):
         self.tts_model = tts
         self.whisper_model = whisper
-        self.status_label.SetLabel("Modelos listos.")
+        self.status_label.SetLabel("Modelos listos. Listo para generar.")
         folder = self.folder_choice.GetStringSelection()
         file = self.file_choice.GetStringSelection()
         if folder and file:
@@ -555,7 +582,6 @@ class MainFrame(wx.Frame):
         seed = self.seed_spin.GetValue()
         temp = self.temp_spin.GetValue()
         top_p = self.top_p_spin.GetValue()
-        chunk_size = self.chunk_spin.GetValue()
         xvec = self.xvector_check.GetValue()
 
         self.generate_btn.Disable()
@@ -564,7 +590,7 @@ class MainFrame(wx.Frame):
 
         thread = GenerationThread(
             self, self.tts_model, audio_path, ref_text, target_text,
-            language, seed, temp, top_p, chunk_size, xvec,
+            language, seed, temp, top_p, xvec,
             self.update_status, self.on_generation_done
         )
         thread.start()
@@ -580,7 +606,7 @@ class MainFrame(wx.Frame):
             try:
                 sf.write(save_path, audio, sr)
                 self.last_saved_path = save_path
-                self.status_label.SetLabel(f"Completado en {num_chunks} fragmentos. Audio guardado en: {save_path}")
+                self.status_label.SetLabel(f"✅ Completado en {num_chunks} fragmentos. Audio guardado en: {save_path}")
             except Exception as e:
                 self.status_label.SetLabel(f"Error guardando: {e}")
             wx.Bell()
@@ -607,14 +633,6 @@ class MainFrame(wx.Frame):
             os.startfile(AUDIOS_DIR)
         except Exception as e:
             wx.MessageBox(f"No se pudo abrir: {e}", "Error", wx.OK | wx.ICON_ERROR)
-
-    def __del__(self):
-        if self.current_temp_file and os.path.exists(self.current_temp_file):
-            try:
-                os.unlink(self.current_temp_file)
-            except:
-                pass
-
 
 # ----------------------------------------------------------------------
 # Punto de entrada
