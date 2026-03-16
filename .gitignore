@@ -22,3 +22,5 @@ wheels/
 .vscode/
 venv/
 env/
+audios/
+voces/
