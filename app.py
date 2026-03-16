@@ -28,7 +28,7 @@ DEVICE = "cuda:0"
 DTYPE = torch.bfloat16
 ATTN_IMPL = "flash_attention_2"
 MAX_NEW_TOKENS = 2048
-CHUNK_SIZE_LIMIT = 900          # Caracteres máximos por fragmento (ajustable)
+CHUNK_SIZE_LIMIT = 700          # Caracteres máximos por fragmento (ajustable)
 
 BASE_DIR = Path(__file__).parent
 VOICES_DIR = BASE_DIR / "voces"
@@ -314,7 +314,7 @@ class GenerationThread(threading.Thread):
 # ----------------------------------------------------------------------
 class MainFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="Clonación de Voz Qwen3-TTS (Ultra Rápido)", size=(950, 700))
+        super().__init__(None, title="Qwen3-TTS", size=(950, 700))
         self.tts_model = None
         self.whisper_model = None
         self.current_audio_data = None
