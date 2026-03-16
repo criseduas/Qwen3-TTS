@@ -414,13 +414,13 @@ class MainFrame(wx.Frame):
         grid2.Add(self.seed_spin, 1, wx.EXPAND)
 
         lbl_temp = wx.StaticText(panel, label="Temperatura (0.1-1.5):")
-        self.temp_spin = wx.SpinCtrlDouble(panel, min=0.1, max=1.5, inc=0.05, initial=0.9)
+        self.temp_spin = wx.SpinCtrlDouble(panel, min=0.1, max=1.5, inc=0.05, initial=0.4)
         self.temp_spin.SetDigits(2)
         grid2.Add(lbl_temp, 0, wx.ALIGN_CENTER_VERTICAL)
         grid2.Add(self.temp_spin, 1, wx.EXPAND)
 
         lbl_top_p = wx.StaticText(panel, label="Top P (0.1-1.0):")
-        self.top_p_spin = wx.SpinCtrlDouble(panel, min=0.1, max=1.0, inc=0.05, initial=1.0)
+        self.top_p_spin = wx.SpinCtrlDouble(panel, min=0.1, max=1.0, inc=0.05, initial=0.4)
         self.top_p_spin.SetDigits(2)
         grid2.Add(lbl_top_p, 0, wx.ALIGN_CENTER_VERTICAL)
         grid2.Add(self.top_p_spin, 1, wx.EXPAND)
