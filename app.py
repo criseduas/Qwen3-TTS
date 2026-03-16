@@ -28,7 +28,7 @@ DEVICE = "cuda:0"
 DTYPE = torch.bfloat16
 ATTN_IMPL = "flash_attention_2"
 MAX_NEW_TOKENS = 2048
-CHUNK_SIZE_LIMIT = 1000          # Caracteres máximos por fragmento (ajustable)
+CHUNK_SIZE_LIMIT = 300          # Caracteres máximos por fragmento (ajustable)
 
 BASE_DIR = Path(__file__).parent
 VOICES_DIR = BASE_DIR / "voces"
