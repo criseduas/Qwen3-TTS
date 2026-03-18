@@ -172,23 +172,28 @@ class ModelLoaderThread(threading.Thread):
                 cleanup_cuda()
         except:
             pass
-        wx.CallAfter(self.parent.on_models_loaded, tts)
+        wx.CallAfter(self.status_callback, "Cargando Whisper...")
+        try:
+            whisper = WhisperModel(WHISPER_SIZE, device="cuda" if "cuda" in DEVICE else "cpu", compute_type="float16")
+        except Exception as e:
+            wx.CallAfter(self.status_callback, f"Error Whisper: {e}")
+            wx.CallAfter(self.parent.on_model_load_failed, str(e))
+            return
+        wx.CallAfter(self.parent.on_models_loaded, tts, whisper)
 
 class TranscriptionThread(threading.Thread):
-    def __init__(self, parent, audio_path, txt_path, callback):
+    def __init__(self, parent, whisper_model, audio_path, txt_path, callback):
         super().__init__()
         self.parent = parent
+        self.whisper = whisper_model
         self.audio_path = audio_path
         self.txt_path = txt_path
         self.callback = callback
 
     def run(self):
-        whisper_model = None
         try:
-            wx.CallAfter(self.parent.update_status, "Cargando Whisper...")
-            whisper_model = WhisperModel(WHISPER_SIZE, device="cuda" if "cuda" in DEVICE else "cpu", compute_type="float16")
             wx.CallAfter(self.parent.update_status, "Transcribiendo...")
-            segments, info = whisper_model.transcribe(str(self.audio_path), language=None, beam_size=5)
+            segments, info = self.whisper.transcribe(str(self.audio_path), language=None, beam_size=5)
             text = " ".join([seg.text for seg in segments])
             with open(self.txt_path, "w", encoding="utf-8") as f:
                 f.write(text)
@@ -196,9 +201,7 @@ class TranscriptionThread(threading.Thread):
         except Exception as e:
             wx.CallAfter(self.callback, None, error=str(e))
         finally:
-            if whisper_model:
-                del whisper_model
-            wx.CallAfter(self.parent.cleanup_whisper)
+            wx.CallAfter(self.parent.unload_whisper)
 
 class SRTGenerationThread(threading.Thread):
     def __init__(self, parent, tts_model, srt_files, voice_path, ref_text, language, seed, temperature, top_p, x_vector_only, status_callback, done_callback):
@@ -300,6 +303,7 @@ class MainFrame(wx.Frame):
     def __init__(self):
         super().__init__(None, title="Qwen3-TTS - Conversor SRT a Audio", size=(950, 800))
         self.tts_model = None
+        self.whisper_model = None
         self.current_audio_data = None
         self.last_saved_path = None
         self.play_process = None
@@ -549,26 +553,28 @@ class MainFrame(wx.Frame):
             except Exception as e:
                 self.status_label.SetLabel(f"Error leyendo .txt: {e}")
             return
-        self.transcript_text.SetValue("")
+        if self.whisper_model is None:
+            self.status_label.SetLabel("Whisper no disponible.")
+            return
         self.generate_btn.Disable()
-        self.status_label.SetLabel("Cargando Whisper y transcribiendo...")
-        thread = TranscriptionThread(self, audio_path, txt_path, self.on_transcription_done)
+        self.status_label.SetLabel("Transcribiendo...")
+        thread = TranscriptionThread(self, self.whisper_model, audio_path, txt_path, self.on_transcription_done)
         thread.start()
 
     def on_transcription_done(self, text, error=None):
         if error:
             self.status_label.SetLabel(f"Error: {error}")
-            wx.MessageBox(f"Error en transcripción: {error}", "Error", wx.OK | wx.ICON_ERROR)
         elif text:
             self.transcript_text.SetValue(text)
             self.status_label.SetLabel("Transcripción lista.")
-            wx.Bell()
         if self.tts_model:
             self.generate_btn.Enable()
 
-    def cleanup_whisper(self):
-        cleanup_cuda()
-        self.status_label.SetLabel("Whisper liberado.")
+    def unload_whisper(self):
+        if self.whisper_model:
+            del self.whisper_model
+            self.whisper_model = None
+            cleanup_cuda()
 
     def load_models(self):
         thread = ModelLoaderThread(self, self.update_status)
@@ -577,9 +583,10 @@ class MainFrame(wx.Frame):
     def update_status(self, msg):
         self.status_label.SetLabel(msg)
 
-    def on_models_loaded(self, tts):
+    def on_models_loaded(self, tts, whisper):
         self.tts_model = tts
-        self.status_label.SetLabel("Modelo TTS listo. Listo para generar.")
+        self.whisper_model = whisper
+        self.status_label.SetLabel("Modelos listos. Listo para generar.")
         folder = self.folder_choice.GetStringSelection()
         file = self.file_choice.GetStringSelection()
         if folder and file:
