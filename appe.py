@@ -33,35 +33,20 @@ BASE_DIR = Path(__file__).parent
 VOICES_DIR = BASE_DIR / "voces"
 AUDIOS_DIR = BASE_DIR / "audios"
 SRT_DIR = BASE_DIR / "srt"
-RVC_DIR = BASE_DIR / "rvc"
-PROJECT_DIR = BASE_DIR / "proyecto"
 VOICES_DIR.mkdir(exist_ok=True)
 AUDIOS_DIR.mkdir(exist_ok=True)
 SRT_DIR.mkdir(exist_ok=True)
-RVC_DIR.mkdir(exist_ok=True)
-PROJECT_DIR.mkdir(exist_ok=True)
 
-LANG_CODE_MAP = {"Spanish": "es", "English": "en", "Chinese": "zh", "Japanese": "ja", "Korean": "ko", "German": "de", "French": "fr", "Russian": "ru", "Portuguese": "pt", "Italian": "it"}
-
-RVC_INDEX_PATH = RVC_DIR / "voz.index"
-CORE_SCRIPT = BASE_DIR / "core.py"
-
-def run_rvc_inference(input_path, output_path, pth_path):
-    try:
-        python_exe = sys.executable
-        cmd = [python_exe, str(CORE_SCRIPT), "infer", "--input_path", str(input_path), "--output_path", str(output_path), "--pth_path", str(pth_path), "--index_path", str(RVC_INDEX_PATH), "--pitch", "0", "--index_rate", "0", "--volume_envelope", "0.25", "--protect", "0", "--f0_method", "rmvpe", "--export_format", "WAV"]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
-            print(f"Error RVC: {result.stderr}")
-            return False
-        return Path(output_path).exists() and Path(output_path).stat().st_size > 0
-    except Exception as e:
-        print(f"Error ejecutando RVC: {e}")
-        return False
+LANG_CODE_MAP = {
+    "Spanish": "es", "English": "en", "Chinese": "zh", "Japanese": "ja",
+    "Korean": "ko", "German": "de", "French": "fr", "Russian": "ru",
+    "Portuguese": "pt", "Italian": "it",
+}
 
 def normalize_ref_audio(audio_path):
     try:
-        audio_segment = AudioSegment.from_file(audio_path).set_frame_rate(24000).set_channels(1)
+        audio_segment = AudioSegment.from_file(audio_path)
+        audio_segment = audio_segment.set_frame_rate(24000).set_channels(1)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             temp_path = f.name
             audio_segment.export(temp_path, format="wav")
@@ -71,9 +56,9 @@ def normalize_ref_audio(audio_path):
         peak = np.max(np.abs(wav))
         if peak > 0:
             wav = wav / (peak + 1e-12)
-        return np.clip(wav, -1.0, 1.0), int(sr)
+        wav = np.clip(wav, -1.0, 1.0)
+        return wav, int(sr)
     except Exception as e:
-        print(f"Error normalizando audio: {e}")
         return None
 
 def split_text_into_chunks(text, language_code, max_chars=CHUNK_SIZE_LIMIT):
@@ -101,7 +86,8 @@ def generate_audio_filename(prefix="generado"):
     return f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}.wav"
 
 def parse_multispeaker_text(text, default_voice):
-    parts = re.split(r'#(\w+)', text)
+    pattern = r'#(\w+)'
+    parts = re.split(pattern, text)
     segments = []
     if parts[0].strip():
         segments.append((default_voice, parts[0].strip()))
@@ -132,16 +118,6 @@ def parse_srt_file(srt_path):
                 entries.append((start_time, end_time, text))
     return entries
 
-def set_seeds(seed):
-    if seed != -1:
-        torch.manual_seed(seed)
-        random.seed(seed)
-        np.random.seed(seed)
-
-def cleanup_cuda():
-    torch.cuda.empty_cache()
-    gc.collect()
-
 class ModelLoaderThread(threading.Thread):
     def __init__(self, parent, status_callback):
         super().__init__()
@@ -151,30 +127,55 @@ class ModelLoaderThread(threading.Thread):
     def run(self):
         wx.CallAfter(self.status_callback, "Cargando modelo TTS...")
         try:
-            tts = Qwen3TTSModel.from_pretrained(MODEL_NAME, device_map=DEVICE, dtype=DTYPE, attn_implementation=ATTN_IMPL)
+            tts = Qwen3TTSModel.from_pretrained(
+                MODEL_NAME,
+                device_map=DEVICE,
+                dtype=DTYPE,
+                attn_implementation=ATTN_IMPL,
+            )
         except Exception as e:
             wx.CallAfter(self.status_callback, f"Error TTS: {e}")
             wx.CallAfter(self.parent.on_model_load_failed, str(e))
             return
         wx.CallAfter(self.status_callback, "Aplicando optimizaciones completas...")
         try:
-            tts.enable_streaming_optimizations(decode_window_frames=300, use_compile=True, use_cuda_graphs=False, compile_mode="max-autotune", use_fast_codebook=True, compile_codebook_predictor=True, compile_talker=True)
+            tts.enable_streaming_optimizations(
+                decode_window_frames=300,
+                use_compile=True,
+                use_cuda_graphs=False,
+                compile_mode="max-autotune",
+                use_fast_codebook=True,
+                compile_codebook_predictor=True,
+                compile_talker=True,
+            )
             wx.CallAfter(self.status_callback, "Calentando el modelo...")
             warmup_texts = ["Hola", "Este es un texto de prueba."]
             dummy_sr = 24000
             dummy_audio = np.zeros(dummy_sr, dtype=np.float32)
             for wtext in warmup_texts:
                 try:
-                    wavs, sr = tts.generate_voice_clone(text=wtext, language="Spanish", ref_audio=(dummy_audio, dummy_sr), ref_text=wtext[:50], x_vector_only_mode=False, max_new_tokens=200)
+                    wavs, sr = tts.generate_voice_clone(
+                        text=wtext,
+                        language="Spanish",
+                        ref_audio=(dummy_audio, dummy_sr),
+                        ref_text=wtext[:50],
+                        x_vector_only_mode=False,
+                        max_new_tokens=200
+                    )
                     del wavs
-                except:
+                except Exception as e:
                     pass
-                cleanup_cuda()
-        except:
+                torch.cuda.empty_cache()
+                gc.collect()
+        except Exception as e:
             pass
         wx.CallAfter(self.status_callback, "Cargando Whisper...")
         try:
-            whisper = WhisperModel(WHISPER_SIZE, device="cuda" if "cuda" in DEVICE else "cpu", compute_type="float16")
+            whisper = WhisperModel(
+                WHISPER_SIZE,
+                device="cuda" if "cuda" in DEVICE else "cpu",
+                compute_type="float16"
+            )
         except Exception as e:
             wx.CallAfter(self.status_callback, f"Error Whisper: {e}")
             wx.CallAfter(self.parent.on_model_load_failed, str(e))
@@ -204,7 +205,9 @@ class TranscriptionThread(threading.Thread):
             wx.CallAfter(self.parent.unload_whisper)
 
 class SRTGenerationThread(threading.Thread):
-    def __init__(self, parent, tts_model, srt_files, voice_path, ref_text, language, seed, temperature, top_p, x_vector_only, status_callback, done_callback):
+    def __init__(self, parent, tts_model, srt_files, voice_path, ref_text,
+                 language, seed, temperature, top_p, x_vector_only,
+                 status_callback, done_callback):
         super().__init__()
         self.parent = parent
         self.tts = tts_model
@@ -221,7 +224,10 @@ class SRTGenerationThread(threading.Thread):
 
     def run(self):
         try:
-            set_seeds(self.seed)
+            if self.seed != -1:
+                torch.manual_seed(self.seed)
+                random.seed(self.seed)
+                np.random.seed(self.seed)
             gen_kwargs = {"max_new_tokens": MAX_NEW_TOKENS * 3}
             if abs(self.temperature - 0.9) > 1e-3:
                 gen_kwargs["temperature"] = self.temperature
@@ -241,13 +247,21 @@ class SRTGenerationThread(threading.Thread):
                     if not text.strip():
                         continue
                     wx.CallAfter(self.status_callback, f"Generando línea: {text[:50]}...")
-                    wavs, sr_out = self.tts.generate_voice_clone(text=text, language=self.language, ref_audio=audio_tuple, ref_text=self.ref_text, x_vector_only_mode=self.x_vector_only, **gen_kwargs)
+                    wavs, sr_out = self.tts.generate_voice_clone(
+                        text=text,
+                        language=self.language,
+                        ref_audio=audio_tuple,
+                        ref_text=self.ref_text,
+                        x_vector_only_mode=self.x_vector_only,
+                        **gen_kwargs
+                    )
                     if sample_rate is None:
                         sample_rate = sr_out
                     audio_data = wavs[0]
                     all_audio_segments.append((start_time, audio_data))
                     del wavs
-                    cleanup_cuda()
+                    torch.cuda.empty_cache()
+                    gc.collect()
                 if all_audio_segments and sample_rate:
                     final_duration = int(total_duration * sample_rate)
                     final_audio = np.zeros(final_duration, dtype=np.float32)
@@ -260,92 +274,32 @@ class SRTGenerationThread(threading.Thread):
                     output_path = SRT_DIR / f"{srt_file.stem}.wav"
                     sf.write(output_path, final_audio, sample_rate)
                     wx.CallAfter(self.status_callback, f"✅ Completado: {output_path}")
-                cleanup_cuda()
-            wx.CallAfter(self.done_callback, True)
-        except Exception as e:
-            wx.CallAfter(self.done_callback, False, str(e))
-
-class ProjectRVCThread(threading.Thread):
-    def __init__(self, parent, project_path, audio_data_list, voice_map, status_callback, done_callback):
-        super().__init__()
-        self.parent = parent
-        self.project_path = project_path
-        self.audio_data_list = audio_data_list
-        self.voice_map = voice_map
-        self.status_callback = status_callback
-        self.done_callback = done_callback
-
-    def run(self):
-        try:
-            total = len(self.audio_data_list)
-            for idx, (voz, audio_data, sr, original_path) in enumerate(self.audio_data_list, 1):
-                wx.CallAfter(self.status_callback, f"🎯 Procesando {voz}/{original_path.name} ({idx}/{total})...")
-                if voz in self.voice_map and self.voice_map[voz]['pth_path']:
-                    pth_path = self.voice_map[voz]['pth_path']
-                    temp_output = original_path.with_suffix('.temp.wav')
-                    print(f"RVC: Procesando {original_path} con modelo {pth_path}")
-                    if run_rvc_inference(original_path, temp_output, pth_path):
-                        time.sleep(0.5)
-                        shutil.move(temp_output, original_path)
-                        print(f"RVC: ✅ Completado {voz}/{original_path.name}")
-                    else:
-                        print(f"RVC: ❌ Error en {voz}/{original_path.name}")
-                        if temp_output.exists():
-                            temp_output.unlink()
-                else:
-                    print(f"RVC: ⚠️ No hay modelo para {voz}")
-                cleanup_cuda()
+                torch.cuda.empty_cache()
+                gc.collect()
             wx.CallAfter(self.done_callback, True)
         except Exception as e:
             wx.CallAfter(self.done_callback, False, str(e))
 
 class MainFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="Qwen3-TTS - Conversor SRT a Audio", size=(950, 800))
+        super().__init__(None, title="Qwen3-TTS - Conversor SRT a Audio", size=(950, 750))
         self.tts_model = None
         self.whisper_model = None
         self.current_audio_data = None
         self.last_saved_path = None
         self.play_process = None
         self.voice_map = {}
-        self.project_audio_data = None
         self._create_accelerators()
         self._create_ui()
         self.scan_voices()
         self.load_models()
-        self.check_existing_project()
         self.Centre()
         self.Show()
-
-    def check_existing_project(self):
-        if not PROJECT_DIR.exists():
-            return
-        audio_data = []
-        for speaker_dir in PROJECT_DIR.iterdir():
-            if speaker_dir.is_dir():
-                voz = speaker_dir.name
-                wav_files = sorted(speaker_dir.glob("*.wav"))
-                for wav_file in wav_files:
-                    try:
-                        audio, sr = sf.read(wav_file)
-                        audio_data.append((voz, audio, sr, wav_file))
-                    except:
-                        pass
-        if audio_data:
-            self.project_audio_data = audio_data
-            self.project_hq_btn.Enable()
-            self.status_label.SetLabel("✅ Proyecto existente cargado. Listo para aplicar alta calidad.")
 
     def scan_voices(self):
         self.voice_map.clear()
         for folder in VOICES_DIR.iterdir():
             if folder.is_dir():
-                pth_path = None
-                for ext in ('*.pth',):
-                    pth_files = list(folder.glob(ext))
-                    if pth_files:
-                        pth_path = pth_files[0]
-                        break
                 for ext in ('*.wav', '*.mp3', '*.m4a'):
                     for audio_file in folder.glob(ext):
                         etiqueta = audio_file.stem
@@ -357,7 +311,7 @@ class MainFrame(wx.Frame):
                                     ref_text = f.read().strip()
                             except:
                                 pass
-                        self.voice_map[etiqueta] = {'path': audio_file, 'ref_text': ref_text, 'pth_path': pth_path}
+                        self.voice_map[etiqueta] = {'path': audio_file, 'ref_text': ref_text}
 
     def _create_accelerators(self):
         self.accel_id_folder = wx.NewIdRef()
@@ -369,9 +323,17 @@ class MainFrame(wx.Frame):
         self.accel_id_stop = wx.NewIdRef()
         self.accel_id_delete = wx.NewIdRef()
         self.accel_id_srt = wx.NewIdRef()
-        self.accel_id_hq = wx.NewIdRef()
-        self.accel_id_project_hq = wx.NewIdRef()
-        entries = [(wx.ACCEL_ALT, ord('C'), self.accel_id_folder), (wx.ACCEL_ALT, ord('A'), self.accel_id_file), (wx.ACCEL_ALT, ord('T'), self.accel_id_text), (wx.ACCEL_ALT, ord('I'), self.accel_id_lang), (wx.ACCEL_ALT, ord('G'), self.accel_id_generate), (wx.ACCEL_ALT, ord('P'), self.accel_id_play), (wx.ACCEL_ALT, ord('S'), self.accel_id_stop), (wx.ACCEL_ALT, ord('D'), self.accel_id_delete), (wx.ACCEL_ALT, ord('R'), self.accel_id_srt), (wx.ACCEL_ALT, ord('O'), self.accel_id_hq), (wx.ACCEL_ALT | wx.ACCEL_SHIFT, ord('O'), self.accel_id_project_hq)]
+        entries = [
+            (wx.ACCEL_ALT, ord('C'), self.accel_id_folder),
+            (wx.ACCEL_ALT, ord('A'), self.accel_id_file),
+            (wx.ACCEL_ALT, ord('T'), self.accel_id_text),
+            (wx.ACCEL_ALT, ord('I'), self.accel_id_lang),
+            (wx.ACCEL_ALT, ord('G'), self.accel_id_generate),
+            (wx.ACCEL_ALT, ord('P'), self.accel_id_play),
+            (wx.ACCEL_ALT, ord('S'), self.accel_id_stop),
+            (wx.ACCEL_ALT, ord('D'), self.accel_id_delete),
+            (wx.ACCEL_ALT, ord('R'), self.accel_id_srt),
+        ]
         self.SetAcceleratorTable(wx.AcceleratorTable(entries))
         self.Bind(wx.EVT_MENU, self.on_accel_folder, id=self.accel_id_folder)
         self.Bind(wx.EVT_MENU, self.on_accel_file, id=self.accel_id_file)
@@ -382,8 +344,6 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_accel_stop, id=self.accel_id_stop)
         self.Bind(wx.EVT_MENU, self.on_accel_delete, id=self.accel_id_delete)
         self.Bind(wx.EVT_MENU, self.on_srt_button, id=self.accel_id_srt)
-        self.Bind(wx.EVT_MENU, self.on_hq_conversion, id=self.accel_id_hq)
-        self.Bind(wx.EVT_MENU, self.on_project_hq_conversion, id=self.accel_id_project_hq)
 
     def on_accel_folder(self, e): self.folder_choice.SetFocus()
     def on_accel_file(self, e): self.file_choice.SetFocus()
@@ -436,7 +396,10 @@ class MainFrame(wx.Frame):
         grid2.AddGrowableCol(1)
         grid2.AddGrowableCol(3)
         lbl_lang = wx.StaticText(panel, label="&Idioma (Alt+I):")
-        self.lang_choice = wx.Choice(panel, choices=["Auto", "Spanish", "English", "Chinese", "Japanese", "Korean", "German", "French", "Russian", "Portuguese", "Italian"])
+        self.lang_choice = wx.Choice(panel, choices=[
+            "Auto", "Spanish", "English", "Chinese", "Japanese", "Korean",
+            "German", "French", "Russian", "Portuguese", "Italian"
+        ])
         self.lang_choice.SetSelection(1)
         grid2.Add(lbl_lang, 0, wx.ALIGN_CENTER_VERTICAL)
         grid2.Add(self.lang_choice, 1, wx.EXPAND)
@@ -473,14 +436,6 @@ class MainFrame(wx.Frame):
         self.generate_btn.Disable()
         self.generate_btn.Bind(wx.EVT_BUTTON, self.on_generate)
         btn_sizer.Add(self.generate_btn, 0, wx.ALL, 5)
-        self.hq_btn = wx.Button(panel, label="🎯 Generar en Alta Calidad (Alt+O)")
-        self.hq_btn.Disable()
-        self.hq_btn.Bind(wx.EVT_BUTTON, self.on_hq_conversion)
-        btn_sizer.Add(self.hq_btn, 0, wx.ALL, 5)
-        self.project_hq_btn = wx.Button(panel, label="🎯 Generar Alta Calidad en Proyecto (Shift+Alt+O)")
-        self.project_hq_btn.Disable()
-        self.project_hq_btn.Bind(wx.EVT_BUTTON, self.on_project_hq_conversion)
-        btn_sizer.Add(self.project_hq_btn, 0, wx.ALL, 5)
         self.save_btn = wx.Button(panel, label="Guardar como...")
         self.save_btn.Disable()
         self.save_btn.Bind(wx.EVT_BUTTON, self.on_save)
@@ -574,7 +529,8 @@ class MainFrame(wx.Frame):
         if self.whisper_model:
             del self.whisper_model
             self.whisper_model = None
-            cleanup_cuda()
+            torch.cuda.empty_cache()
+            gc.collect()
 
     def load_models(self):
         thread = ModelLoaderThread(self, self.update_status)
@@ -629,7 +585,8 @@ class MainFrame(wx.Frame):
         if not ref_text:
             wx.MessageBox("El texto transcrito no puede estar vacío.", "Error", wx.OK | wx.ICON_WARNING)
             return
-        with wx.FileDialog(self, "Seleccionar archivos SRT", wildcard="SRT files (*.srt)|*.srt", style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST | wx.FD_MULTIPLE) as dlg:
+        with wx.FileDialog(self, "Seleccionar archivos SRT", wildcard="SRT files (*.srt)|*.srt",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST | wx.FD_MULTIPLE) as dlg:
             if dlg.ShowModal() == wx.ID_OK:
                 srt_files = [Path(path) for path in dlg.GetPaths()]
                 language = self.lang_choice.GetStringSelection()
@@ -643,10 +600,12 @@ class MainFrame(wx.Frame):
                 self.play_btn.Disable()
                 self.delete_btn.Disable()
                 self.srt_btn.Disable()
-                self.hq_btn.Disable()
-                self.project_hq_btn.Disable()
                 self.status_label.SetLabel(f"Procesando {len(srt_files)} archivo(s) SRT...")
-                thread = SRTGenerationThread(self, self.tts_model, srt_files, voice_path, ref_text, language, seed, temp, top_p, xvec, self.update_status, self.on_srt_generation_done)
+                thread = SRTGenerationThread(
+                    self, self.tts_model, srt_files, voice_path, ref_text,
+                    language, seed, temp, top_p, xvec,
+                    self.update_status, self.on_srt_generation_done
+                )
                 thread.start()
 
     def on_srt_generation_done(self, success, error=None):
@@ -685,10 +644,13 @@ class MainFrame(wx.Frame):
         self.save_btn.Disable()
         self.play_btn.Disable()
         self.delete_btn.Disable()
-        self.hq_btn.Disable()
-        self.project_hq_btn.Disable()
         self.status_label.SetLabel("Iniciando generación...")
-        thread = GenerationThread(self, self.tts_model, audio_path, ref_text, target_text, language, seed, temp, top_p, xvec, export_separated, self.voice_map, default_voice, self.update_status, self.on_generation_done)
+        thread = GenerationThread(
+            self, self.tts_model, audio_path, ref_text, target_text,
+            language, seed, temp, top_p, xvec, export_separated,
+            self.voice_map, default_voice,
+            self.update_status, self.on_generation_done
+        )
         thread.start()
 
     def on_generation_done(self, audio_data, sr, num_chunks, is_separated, error=None):
@@ -697,28 +659,31 @@ class MainFrame(wx.Frame):
             wx.MessageBox(f"Error: {error}", "Error", wx.OK | wx.ICON_ERROR)
         elif audio_data is not None:
             if is_separated:
-                if PROJECT_DIR.exists():
+                proj_base = BASE_DIR / "proyecto"
+                if proj_base.exists():
                     try:
-                        shutil.rmtree(PROJECT_DIR)
+                        shutil.rmtree(proj_base)
                     except:
                         pass
-                PROJECT_DIR.mkdir(parents=True, exist_ok=True)
-                m3u_path = PROJECT_DIR / "lista_reproduccion.m3u"
-                self.project_audio_data = []
+                proj_base.mkdir(parents=True, exist_ok=True)
+                m3u_path = proj_base / "lista_reproduccion.m3u"
                 with open(m3u_path, "w", encoding="utf-8") as m3u:
                     for i, (voz, arr) in enumerate(audio_data, 1):
-                        speaker_dir = PROJECT_DIR / voz
+                        speaker_dir = proj_base / voz
                         speaker_dir.mkdir(exist_ok=True)
                         filepath = speaker_dir / f"{i}.wav"
                         sf.write(filepath, arr, sr)
                         m3u.write(f"{voz}/{i}.wav\n")
-                        self.project_audio_data.append((voz, arr, sr, filepath))
                 self.last_saved_path = m3u_path
                 self.current_audio_data = None
-                self.status_label.SetLabel(f"✅ Audios separados en: {PROJECT_DIR}")
+                self.status_label.SetLabel(f"✅ Audios separados en: {proj_base}")
                 wx.Bell()
-                wx.MessageBox(f"El proyecto ha sido generado exitosamente en:\n{PROJECT_DIR}", "Proyecto Creado", wx.OK | wx.ICON_INFORMATION)
-                self.project_hq_btn.Enable()
+                wx.MessageBox(
+                    f"El proyecto ha sido generado exitosamente en:\n{proj_base}",
+                    "Proyecto Creado", 
+                    wx.OK | wx.ICON_INFORMATION
+                )
+                self.save_btn.Disable()
                 self.play_btn.Enable()
                 self.delete_btn.Enable()
             else:
@@ -735,98 +700,16 @@ class MainFrame(wx.Frame):
                 self.save_btn.Enable()
                 self.play_btn.Enable()
                 self.delete_btn.Enable()
-                self.hq_btn.Enable()
         else:
             self.status_label.SetLabel("No se generó audio.")
         self.generate_btn.Enable()
-
-    def on_hq_conversion(self, event):
-        if not self.last_saved_path or not self.last_saved_path.exists():
-            wx.MessageBox("No hay audio para convertir.", "Error", wx.OK | wx.ICON_WARNING)
-            return
-        folder = self.folder_choice.GetStringSelection()
-        file = self.file_choice.GetStringSelection()
-        if not folder or not file:
-            wx.MessageBox("Selecciona la voz de referencia.", "Error", wx.OK | wx.ICON_WARNING)
-            return
-        voice_name = Path(file).stem
-        if voice_name not in self.voice_map or not self.voice_map[voice_name]['pth_path']:
-            wx.MessageBox(f"No hay modelo .pth para la voz {voice_name}", "Error", wx.OK | wx.ICON_WARNING)
-            return
-        self.hq_btn.Disable()
-        self.play_btn.Disable()
-        self.delete_btn.Disable()
-        self.generate_btn.Disable()
-        self.project_hq_btn.Disable()
-        self.status_label.SetLabel("🎯 Aplicando alta calidad...")
-        thread = threading.Thread(target=self._run_hq_conversion_thread, args=(self.last_saved_path, self.voice_map[voice_name]['pth_path']))
-        thread.daemon = True
-        thread.start()
-
-    def _run_hq_conversion_thread(self, input_path, pth_path):
-        try:
-            temp_output = input_path.with_suffix('.temp.wav')
-            print(f"RVC: Procesando {input_path} con modelo {pth_path}")
-            wx.CallAfter(self.status_label.SetLabel, "🎯 Procesando con RVC...")
-            success = run_rvc_inference(input_path, temp_output, pth_path)
-            if success and temp_output.exists():
-                time.sleep(0.5)
-                shutil.move(str(temp_output), str(input_path))
-                print(f"RVC: ✅ Completado {input_path.name}")
-                wx.CallAfter(self.status_label.SetLabel, f"✅ Alta calidad aplicada a: {input_path.name}")
-                wx.CallAfter(wx.Bell)
-            else:
-                print(f"RVC: ❌ Error en {input_path.name}")
-                if temp_output.exists():
-                    temp_output.unlink()
-                wx.CallAfter(self.status_label.SetLabel, "❌ Error en conversión RVC")
-        except Exception as e:
-            print(f"RVC: Error: {e}")
-            wx.CallAfter(self.status_label.SetLabel, f"❌ Error: {str(e)}")
-        finally:
-            wx.CallAfter(self._enable_buttons_after_hq)
-
-    def _enable_buttons_after_hq(self):
-        self.hq_btn.Enable()
-        self.play_btn.Enable()
-        self.delete_btn.Enable()
-        self.generate_btn.Enable()
-        if self.project_audio_data:
-            self.project_hq_btn.Enable()
-
-    def on_project_hq_conversion(self, event):
-        if not self.project_audio_data:
-            wx.MessageBox("No hay proyecto cargado.", "Error", wx.OK | wx.ICON_WARNING)
-            return
-        self.hq_btn.Disable()
-        self.play_btn.Disable()
-        self.delete_btn.Disable()
-        self.generate_btn.Disable()
-        self.project_hq_btn.Disable()
-        self.status_label.SetLabel("🎯 Aplicando alta calidad al proyecto...")
-        thread = ProjectRVCThread(self, PROJECT_DIR, self.project_audio_data, self.voice_map, self.update_status, self.on_project_rvc_done)
-        thread.start()
-
-    def on_project_rvc_done(self, success, error=None):
-        if success:
-            self.status_label.SetLabel("✅ Proyecto con alta calidad completado.")
-            wx.Bell()
-            wx.MessageBox("Todos los audios del proyecto han sido procesados con alta calidad.", "Proyecto Completado", wx.OK | wx.ICON_INFORMATION)
-        else:
-            self.status_label.SetLabel(f"❌ Error en proyecto: {error}")
-            wx.MessageBox(f"Error procesando proyecto: {error}", "Error", wx.OK | wx.ICON_ERROR)
-        self.play_btn.Enable()
-        self.delete_btn.Enable()
-        self.generate_btn.Enable()
-        self.hq_btn.Enable()
-        if self.project_audio_data:
-            self.project_hq_btn.Enable()
 
     def on_save(self, event):
         if self.current_audio_data is None:
             return
         audio, sr = self.current_audio_data
-        with wx.FileDialog(self, "Guardar audio", wildcard="WAV (*.wav)|*.wav", style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+        with wx.FileDialog(self, "Guardar audio", wildcard="WAV (*.wav)|*.wav",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
             if dlg.ShowModal() == wx.ID_OK:
                 try:
                     sf.write(dlg.GetPath(), audio, sr)
@@ -839,9 +722,16 @@ class MainFrame(wx.Frame):
             self.on_stop(None)
             try:
                 if self.last_saved_path.suffix == '.m3u':
-                    self.play_process = subprocess.Popen(["ffplay", "-nodisp", "-autoexit", self.last_saved_path.name], cwd=str(self.last_saved_path.parent), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    self.play_process = subprocess.Popen(["ffplay", "-nodisp", "-autoexit", self.last_saved_path.name],
+                        cwd=str(self.last_saved_path.parent),
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
                 else:
-                    self.play_process = subprocess.Popen(["ffplay", "-nodisp", "-autoexit", str(self.last_saved_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    self.play_process = subprocess.Popen(["ffplay", "-nodisp", "-autoexit", str(self.last_saved_path)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
                 self.stop_btn.Enable()
                 self.status_label.SetLabel("Reproduciendo...")
             except Exception as e:
@@ -862,7 +752,6 @@ class MainFrame(wx.Frame):
             try:
                 if self.last_saved_path.suffix == '.m3u':
                     shutil.rmtree(self.last_saved_path.parent)
-                    self.project_audio_data = None
                 else:
                     os.remove(self.last_saved_path)
                 self.last_saved_path = None
@@ -870,8 +759,6 @@ class MainFrame(wx.Frame):
                 self.save_btn.Disable()
                 self.play_btn.Disable()
                 self.delete_btn.Disable()
-                self.hq_btn.Disable()
-                self.project_hq_btn.Disable()
                 self.status_label.SetLabel("Último audio (o proyecto) eliminado.")
             except Exception as e:
                 wx.MessageBox(f"Error al eliminar: {e}", "Error", wx.OK | wx.ICON_ERROR)
@@ -885,7 +772,10 @@ class MainFrame(wx.Frame):
             wx.MessageBox(f"No se pudo abrir: {e}", "Error", wx.OK | wx.ICON_ERROR)
 
 class GenerationThread(threading.Thread):
-    def __init__(self, parent, tts_model, ref_audio_path, ref_text, target_text, language, seed, temperature, top_p, x_vector_only, export_separated, voice_map, default_voice, status_callback, done_callback):
+    def __init__(self, parent, tts_model, ref_audio_path, ref_text,
+                 target_text, language, seed, temperature, top_p,
+                 x_vector_only, export_separated, voice_map, default_voice,
+                 status_callback, done_callback):
         super().__init__()
         self.parent = parent
         self.tts = tts_model
@@ -905,7 +795,10 @@ class GenerationThread(threading.Thread):
 
     def run(self):
         try:
-            set_seeds(self.seed)
+            if self.seed != -1:
+                torch.manual_seed(self.seed)
+                random.seed(self.seed)
+                np.random.seed(self.seed)
             gen_kwargs = {"max_new_tokens": MAX_NEW_TOKENS}
             if abs(self.temperature - 0.9) > 1e-3:
                 gen_kwargs["temperature"] = self.temperature
@@ -948,22 +841,30 @@ class GenerationThread(threading.Thread):
                     current_segment_audio = []
                     for i, chunk in enumerate(chunks):
                         wx.CallAfter(self.status_callback, f"Generando {voz} fragmento {i+1}/{len(chunks)}...")
-                        wavs, sr_out = self.tts.generate_voice_clone(text=chunk, language=self.language, ref_audio=audio_tuple, ref_text=ref_text, x_vector_only_mode=self.x_vector_only, **gen_kwargs)
+                        wavs, sr_out = self.tts.generate_voice_clone(
+                            text=chunk,
+                            language=self.language,
+                            ref_audio=audio_tuple,
+                            ref_text=ref_text,
+                            x_vector_only_mode=self.x_vector_only,
+                            **gen_kwargs
+                        )
                         if sample_rate is None:
                             sample_rate = sr_out
                         current_segment_audio.append(wavs[0])
                         del wavs
-                        cleanup_cuda()
+                        torch.cuda.empty_cache()
+                        gc.collect()
                     if current_segment_audio:
                         all_audio_segments.append((voz, np.concatenate(current_segment_audio)))
                 if all_audio_segments:
                     if self.export_separated:
-                        wx.CallAfter(self.done_callback, all_audio_segments, sample_rate, len(segments), True, None)
+                        wx.CallAfter(self.done_callback, all_audio_segments, sample_rate, len(segments), True)
                     else:
                         final_audio = np.concatenate([audio for _, audio in all_audio_segments])
-                        wx.CallAfter(self.done_callback, final_audio, sample_rate, len(segments), False, None)
+                        wx.CallAfter(self.done_callback, final_audio, sample_rate, len(segments), False)
                 else:
-                    wx.CallAfter(self.done_callback, None, None, 0, False, "No se generó audio")
+                    wx.CallAfter(self.done_callback, None, None, 0, False)
             else:
                 wx.CallAfter(self.status_callback, "Normalizando audio...")
                 audio_tuple = normalize_ref_audio(self.ref_audio_path)
@@ -979,21 +880,28 @@ class GenerationThread(threading.Thread):
                 sample_rate = None
                 for i, chunk in enumerate(chunks):
                     wx.CallAfter(self.status_callback, f"Generando fragmento {i+1}/{len(chunks)}...")
-                    wavs, sr_out = self.tts.generate_voice_clone(text=chunk, language=self.language, ref_audio=audio_tuple, ref_text=self.ref_text, x_vector_only_mode=self.x_vector_only, **gen_kwargs)
+                    wavs, sr_out = self.tts.generate_voice_clone(
+                        text=chunk,
+                        language=self.language,
+                        ref_audio=audio_tuple,
+                        ref_text=self.ref_text,
+                        x_vector_only_mode=self.x_vector_only,
+                        **gen_kwargs
+                    )
                     if sample_rate is None:
                         sample_rate = sr_out
                     all_audio.append(wavs[0])
                     del wavs
-                    cleanup_cuda()
+                    torch.cuda.empty_cache()
+                    gc.collect()
                 if all_audio:
                     final_audio = np.concatenate(all_audio)
                     if self.export_separated:
-                        default_voice_name = Path(self.ref_audio_path).stem
-                        wx.CallAfter(self.done_callback, [(default_voice_name, final_audio)], sample_rate, len(chunks), True, None)
+                        wx.CallAfter(self.done_callback, [(self.default_voice, final_audio)], sample_rate, len(chunks), True)
                     else:
-                        wx.CallAfter(self.done_callback, final_audio, sample_rate, len(chunks), False, None)
+                        wx.CallAfter(self.done_callback, final_audio, sample_rate, len(chunks), False)
                 else:
-                    wx.CallAfter(self.done_callback, None, None, 0, False, "No se generó audio")
+                    wx.CallAfter(self.done_callback, None, None, 0, False)
         except Exception as e:
             wx.CallAfter(self.done_callback, None, None, 0, False, str(e))
 
